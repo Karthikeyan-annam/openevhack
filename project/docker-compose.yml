@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  waste-management-env:
+    build: .
+    container_name: waste-management-env
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MODEL_NAME=${MODEL_NAME:-gpt-3.5-turbo}
+      - API_BASE_URL=${API_BASE_URL:-https://api.openai.com/v1}
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

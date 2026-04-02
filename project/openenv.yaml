@@ -1,0 +1,95 @@
+name: smart-waste-management
+version: "1.0.0"
+description: "OpenEnv-compatible Smart Waste Management simulation environment"
+
+entry_point: "app:app"
+
+tasks:
+  - name: easy
+    description: "5 bins, 100-step episode, slow fill rate"
+    difficulty: 1
+    parameters:
+      num_bins: 5
+      bin_max_fill_rate: 0.05
+      truck_capacity: 500.0
+      time_limit: 100
+    
+  - name: medium
+    description: "10 bins, 150-step episode, moderate fill rate"
+    difficulty: 2
+    parameters:
+      num_bins: 10
+      bin_max_fill_rate: 0.10
+      truck_capacity: 750.0
+      time_limit: 150
+    
+  - name: hard
+    description: "15 bins, 200-step episode, fast fill rate"
+    difficulty: 3
+    parameters:
+      num_bins: 15
+      bin_max_fill_rate: 0.15
+      truck_capacity: 1000.0
+      time_limit: 200
+
+api_endpoints:
+  - path: /reset
+    method: POST
+    description: "Reset environment to initial state"
+  
+  - path: /step
+    method: POST
+    description: "Execute one environment step with action"
+  
+  - path: /state
+    method: GET
+    description: "Get current environment state"
+
+observation_space:
+  bin_levels: "list[float]"
+  bin_locations: "list[int]"
+  truck_capacity: "float"
+  current_load: "float"
+  truck_location: "int"
+  truck_fuel: "float"
+  time: "int"
+  total_collected: "float"
+  total_overflows: "int"
+
+action_space:
+  type: "dict"
+  fields:
+    action_type: "str (collect|move|wait)"
+    bin_id: "int (for collect action)"
+    target_location: "int (for move action)"
+
+reward:
+  collect_full: 1.0
+  collect_partial: 0.3
+  truck_full_bonus: 0.2
+  move_strategic: 0.1
+  overflow_penalty: -1.0
+  invalid_action_penalty: -0.5
+
+system_requirements:
+  cpu_cores: 2
+  memory_gb: 8
+  python_version: "3.10+"
+  inference_time_limit_minutes: 20
+
+performance_metrics:
+  - name: collection_efficiency
+    weight: 0.40
+    description: "Percentage of waste collected"
+  
+  - name: overflow_prevention
+    weight: 0.30
+    description: "Bin overflows prevented"
+  
+  - name: fuel_efficiency
+    weight: 0.20
+    description: "Fuel consumption optimization"
+  
+  - name: time_management
+    weight: 0.10
+    description: "Active operations during episode"
