@@ -1,141 +1,183 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-from typing import Optional
 import logging
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Query
 
 from env.environment import SmartWasteManagementEnvironment
+from env.models import Action
 from env.tasks import TaskRegistry
-from env.models import Action, EnvironmentState
 
-# Configure logging
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Smart Waste Management Environment",
     description="OpenEnv-compatible waste management simulation",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# Global environment state
 env: Optional[SmartWasteManagementEnvironment] = None
-current_task: str = "medium"
+current_task = "medium"
+
+
+def serialize_model(model):
+    """Support Pydantic v2 JSON serialization without leaking model objects."""
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def initialize_environment(task_name: str) -> SmartWasteManagementEnvironment:
+    task = TaskRegistry.get_task(task_name)
+    return SmartWasteManagementEnvironment(task)
+
+
+def require_environment() -> SmartWasteManagementEnvironment:
+    if env is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Environment not initialized. Call /reset first.",
+        )
+    return env
+
+
+def parse_action(action: str) -> Action:
+    normalized = action.strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Action query parameter is required.")
+
+    if normalized == "wait":
+        return Action(action_type="wait")
+
+    action_type, separator, raw_value = normalized.partition("_")
+    if separator == "":
+        raise HTTPException(
+            status_code=400,
+            detail="Action must be formatted as wait, collect_<bin_id>, or move_<location>.",
+        )
+
+    try:
+        parsed_value = int(raw_value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Action suffix must be an integer.",
+        ) from exc
+
+    if action_type == "collect":
+        return Action(action_type="collect", bin_id=parsed_value)
+    if action_type == "move":
+        return Action(action_type="move", target_location=parsed_value)
+
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported action type. Use wait, collect_<bin_id>, or move_<location>.",
+    )
 
 
 @app.on_event("startup")
 async def startup():
-    """Initialize environment on startup."""
-    global env, current_task
-    task = TaskRegistry.get_task(current_task)
-    env = SmartWasteManagementEnvironment(task)
-    logger.info(f"Environment initialized with task: {current_task}")
+    """Initialize the default environment when the API boots."""
+    global env
+    env = initialize_environment(current_task)
+    logger.info("Environment initialized with task: %s", current_task)
 
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
     return {
         "status": "running",
         "environment": "Smart Waste Management",
-        "version": "1.0.0"
+        "version": "1.0.0",
     }
 
 
 @app.get("/tasks")
 async def list_tasks():
-    """List available tasks."""
     return {
         "tasks": TaskRegistry.list_tasks(),
-        "current_task": current_task
+        "current_task": current_task,
     }
 
 
-@app.post("/reset")
-async def reset_environment(task: Optional[str] = None):
-    """Reset the environment to initial state."""
+@app.get("/reset")
+async def reset_environment(task: Optional[str] = Query(default=None)):
+    """Reset the environment to the selected task."""
     global env, current_task
-    
+
     try:
-        if task and task in TaskRegistry.list_tasks():
+        if task is not None:
+            if task not in TaskRegistry.list_tasks():
+                raise HTTPException(status_code=400, detail=f"Unknown task '{task}'.")
             current_task = task
-        
-        task_obj = TaskRegistry.get_task(current_task)
-        env = SmartWasteManagementEnvironment(task_obj)
+
+        env = initialize_environment(current_task)
         state = env.reset()
-        
-        logger.info(f"Environment reset with task: {current_task}")
-        
+        logger.info("Environment reset with task: %s", current_task)
+
         return {
             "status": "success",
             "message": f"Environment reset with task: {current_task}",
-            "state": state.dict(),
-            "observation": env.get_observation_dict()
+            "state": serialize_model(state),
+            "observation": env.get_observation_dict(),
         }
-    except Exception as e:
-        logger.error(f"Reset failed: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Reset failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/step")
-async def step_environment(action_dict: dict):
-    """Execute one step in the environment."""
-    global env
-    
-    if env is None:
-        raise HTTPException(status_code=400, detail="Environment not initialized. Call /reset first.")
-    
+@app.get("/step")
+async def step_environment(action: str = Query(..., description="wait, collect_<bin_id>, or move_<location>")):
+    """Execute one step using a GET-friendly action query parameter."""
+    active_env = require_environment()
+
     try:
-        action = Action(
-            action_type=action_dict.get("action_type", "wait"),
-            bin_id=action_dict.get("bin_id", -1),
-            target_location=action_dict.get("target_location", -1)
-        )
-        
-        result = env.step(action)
-        
+        parsed_action = parse_action(action)
+        result = active_env.step(parsed_action)
         return {
             "status": "success",
-            "state": result.state.dict(),
+            "action": action,
+            "state": serialize_model(result.state),
             "reward": result.reward,
             "done": result.done,
             "info": result.info,
-            "observation": env.get_observation_dict()
+            "observation": active_env.get_observation_dict(),
         }
-    except Exception as e:
-        logger.error(f"Step failed: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Step failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/state")
 async def get_state():
-    """Get current environment state."""
-    global env
-    
-    if env is None:
-        raise HTTPException(status_code=400, detail="Environment not initialized. Call /reset first.")
-    
+    active_env = require_environment()
+
     try:
-        state = env.state()
+        state = active_env.state()
         return {
             "status": "success",
-            "state": state.dict(),
-            "observation": env.get_observation_dict()
+            "state": serialize_model(state),
+            "observation": active_env.get_observation_dict(),
         }
-    except Exception as e:
-        logger.error(f"Get state failed: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        logger.exception("Get state failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check."""
     return {
         "status": "healthy",
         "environment_initialized": env is not None,
-        "current_task": current_task
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    uvicorn.run(app, host="0.0.0.0", port=7860)
